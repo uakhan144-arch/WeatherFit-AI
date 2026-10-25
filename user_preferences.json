@@ -1,0 +1,13 @@
+{
+  "consent": true,
+  "preferences": {
+    "occasion": "Daily casual",
+    "style": "Casual",
+    "personality": "Confident",
+    "budget": "Budget-friendly",
+    "colours": "Navy, white, beige",
+    "gender": "Men",
+    "comfort": "Balanced",
+    "repeat_days": "7"
+  }
+}

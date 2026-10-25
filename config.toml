@@ -1,0 +1,11 @@
+# Pastel light theme for WeatherFit AI (used by Streamlit's own widgets; ui_theme.py adds the finer styling).
+[theme]
+base = "light"
+primaryColor = "#9B7BEA"
+backgroundColor = "#FAF8FF"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#231F4F"
+font = "sans serif"
+
+[browser]
+gatherUsageStats = false

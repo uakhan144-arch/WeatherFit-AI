@@ -1,0 +1,13 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+user_preferences.json
+# private wardrobe photos, downloaded/imported dataset images and the database
+data/
+*.db
+*.db-wal
+*.db-shm
+*.db.bak*
+.streamlit/secrets.toml

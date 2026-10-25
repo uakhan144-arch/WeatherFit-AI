@@ -1,0 +1,12 @@
+# 1.41+ is needed for st.container(key=...) / widget CSS class names used by the pastel dashboard
+streamlit>=1.41.0,<2.0
+requests>=2.31.0,<3.0
+python-dotenv>=1.0.1,<2.0
+Pillow>=10.0.0
+# Time-zone data (needed on Windows for arrival-time calculations across places)
+tzdata>=2024.1
+# Browser geolocation (asks the browser for permission). Optional: manual city entry works without it.
+streamlit-geolocation>=0.0.10
+# Optional Gemini LLM chat, photo analysis, and image generation:
+google-genai>=1.0.0
+# Optional FashionCLIP image matching: install PyTorch + Transformers as described in README.

@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WeatherFit voice</title>
+<style>
+  :root { --bg: transparent; --fg: #2B2A4C; --muted: #6E6A8C; --primary: #9B7BEA; --card: #F3EDFF; --ok: #1a7f37; --warn: #9a6700; --err: #cf222e; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 4px 2px 8px; font-family: "Source Sans Pro", system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--fg); background: var(--bg); }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0; }
+  button { font: inherit; border: 1px solid rgba(128,128,128,.4); background: var(--card); color: var(--fg); border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--primary); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button:focus-visible { outline: 3px solid var(--primary); outline-offset: 2px; }
+  #mic { background: var(--primary); color: #fff; border-color: var(--primary); font-weight: 600; padding: 10px 18px; }
+  #mic.live { animation: pulse 1.2s infinite; }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(255,75,75,.55); } 70% { box-shadow: 0 0 0 14px rgba(255,75,75,0); } 100% { box-shadow: 0 0 0 0 rgba(255,75,75,0); } }
+  @media (prefers-reduced-motion: reduce) { #mic.live { animation: none; } }
+  #status { min-height: 1.4em; margin: 6px 0 2px; font-size: .95rem; }
+  #status.info { color: var(--fg); } #status.ok { color: var(--ok); } #status.warn { color: var(--warn); } #status.error { color: var(--err); }
+  #interim { min-height: 1.3em; font-style: italic; color: var(--muted); }
+  #voiceinfo, #support { font-size: .82rem; color: var(--muted); }
+  label { font-size: .9rem; }
+</style>
+</head>
+<body>
+  <div class="row">
+    <button id="mic" type="button" aria-label="Start listening">🎤 Tap to speak</button>
+    <button id="stop" type="button" disabled aria-label="Stop listening">⏹ Stop</button>
+    <button id="replay" type="button" disabled aria-label="Read the last answer aloud again">🔊 Replay answer</button>
+    <button id="mute" type="button" disabled aria-label="Stop speaking">🔇 Stop speaking</button>
+  </div>
+  <div id="status" role="status" aria-live="polite">Loading…</div>
+  <div id="interim" aria-live="polite"></div>
+  <div id="voiceinfo"></div>
+  <div id="support"></div>
+
+<script>
+(function () {
+  "use strict";
+  var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  var synth = window.speechSynthesis;
+  var args = {};
+  var rec = null, listening = false, finalText = "", sawError = false, timer = null, counter = 0;
+  var lastText = "", lastLang = "en-IN", lastSpokenId = readStore();
+  function $(id) { return document.getElementById(id); }
+
+  // ---------------------------------------------------------------- Streamlit component protocol (v1, no build step needed)
+  function post(type, extra) { window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, extra || {}), "*"); }
+  function emit(payload) { payload.id = Date.now() + "-" + (++counter); post("streamlit:setComponentValue", { value: payload, dataType: "json" }); }
+  function resize() { post("streamlit:setFrameHeight", { height: Math.ceil(document.documentElement.scrollHeight) + 6 }); }
+  function readStore() { try { return window.sessionStorage.getItem("wf_last_spoken") || ""; } catch (e) { return ""; } }
+  function writeStore(v) { try { window.sessionStorage.setItem("wf_last_spoken", v); } catch (e) { /* storage may be blocked; harmless */ } }
+
+  function applyTheme(t) {
+    if (!t) return;
+    var r = document.documentElement.style;
+    if (t.textColor) r.setProperty("--fg", t.textColor);
+    if (t.primaryColor) r.setProperty("--primary", t.primaryColor);
+    if (t.secondaryBackgroundColor) r.setProperty("--card", t.secondaryBackgroundColor);
+    if (t.font) document.body.style.fontFamily = t.font;
+  }
+
+  function setStatus(msg, kind) { var s = $("status"); s.textContent = msg; s.className = kind || "info"; resize(); }
+
+  // ---------------------------------------------------------------- speech recognition (speech-to-text)
+  var ERRORS = {
+    "not-allowed": "Microphone permission is blocked. Click the lock/tune icon at the left of the address bar, set Microphone to Allow, then reload the page. You can also type your question below.",
+    "service-not-allowed": "This browser does not allow speech recognition here (check the browser's microphone / dictation settings). You can type your question below.",
+    "no-speech": "I didn't hear anything. Tap the microphone, wait for 'Listening', and speak a little closer to the mic.",
+    "audio-capture": "No microphone was found or it is in use by another app. Plug one in or close the other app, then try again.",
+    "network": "Speech recognition needs an internet connection (Chrome and Edge send the audio to their online speech service). Check your connection or type your question below.",
+    "language-not-supported": "This browser doesn't support speech recognition for the selected language. Try the other language option, or type your question.",
+    "bad-grammar": "Speech recognition could not understand that. Please try again."
+  };
+
+  function setIdle() {
+    listening = false; clearTimeout(timer);
+    $("mic").classList.remove("live"); $("mic").disabled = !SR; $("stop").disabled = true; resize();
+  }
+
+  function startListening() {
+    if (!SR) { showSupport(); return; }
+    if (listening) { return; }
+    stopSpeaking();
+    $("interim").textContent = ""; finalText = ""; sawError = false;
+    try {
+      rec = new SR();
+      rec.lang = args.recognition_lang || "en-IN";
+      rec.interimResults = true; rec.continuous = false; rec.maxAlternatives = 1;
+    } catch (e) { setStatus("Could not start speech recognition: " + e.message, "error"); return; }
+    rec.onstart = function () {
+      listening = true; $("mic").classList.add("live"); $("mic").disabled = true; $("stop").disabled = false;
+      setStatus("🎙️ Listening… speak now (" + rec.lang + ").", "info");
+    };
+    rec.onresult = function (ev) {
+      var interim = "";
+      for (var i = ev.resultIndex; i < ev.results.length; i++) {
+        var r = ev.results[i];
+        if (r.isFinal) { finalText += r[0].transcript + " "; } else { interim += r[0].transcript; }
+      }
+      $("interim").textContent = (finalText + interim).trim();
+    };
+    rec.onerror = function (ev) {
+      if (ev.error === "aborted") { return; }
+      sawError = true;
+      var msg = ERRORS[ev.error] || ("Speech recognition error: " + ev.error + ". You can type your question below instead.");
+      setStatus("⚠️ " + msg, "error");
+      emit({ type: "error", error: ev.error, message: msg });
+    };
+    rec.onend = function () {
+      setIdle();
+      var text = finalText.trim();
+      if (text) { setStatus("✅ Heard you. Looking up the weather…", "ok"); emit({ type: "transcript", text: text, lang: rec.lang }); }
+      else if (!sawError) { setStatus("I didn't catch that. Tap the microphone and try again, or type your question below.", "warn"); }
+    };
+    try { rec.start(); setStatus("Starting the microphone… (allow it if your browser asks)", "info"); }
+    catch (e) { setIdle(); setStatus("⚠️ Could not start the microphone: " + e.message, "error"); return; }
+    timer = setTimeout(function () { try { rec.stop(); } catch (e) { /* already stopped */ } }, 15000);
+  }
+
+  function stopListening() { if (rec && listening) { try { rec.stop(); } catch (e) { /* ignore */ } } }
+
+  // ---------------------------------------------------------------- speech synthesis (text-to-speech, built into the browser: free, no API)
+  function norm(s) { return String(s || "").replace("_", "-").toLowerCase(); }
+  function pickVoice(lang) {
+    if (!synth) { return null; }
+    var voices = synth.getVoices() || [], want = norm(lang), base = want.split("-")[0];
+    var c = voices.filter(function (v) { return norm(v.lang) === want; });
+    if (!c.length) { c = voices.filter(function (v) { return norm(v.lang).split("-")[0] === base; }); }
+    c.sort(function (a, b) { return (b.localService ? 1 : 0) - (a.localService ? 1 : 0); });
+    return c[0] || null;
+  }
+  function splitText(text) {   // short chunks avoid a Chrome bug where long speech stops after ~15 seconds
+    var parts = String(text).replace(/\s+/g, " ").match(/[^.!?।]+[.!?।]*/g) || [text], out = [], cur = "";
+    parts.forEach(function (p) { if ((cur + p).length > 180 && cur) { out.push(cur.trim()); cur = p; } else { cur += p; } });
+    if (cur.trim()) { out.push(cur.trim()); }
+    return out;
+  }
+  function updateVoiceInfo(lang) {
+    var el = $("voiceinfo");
+    if (!synth) { el.textContent = "Spoken answers are not supported in this browser. The answer is shown as text."; resize(); return; }
+    var v = pickVoice(lang || lastLang);
+    el.textContent = v ? ("Voice: " + v.name + " (" + v.lang + (v.localService ? ", installed on this device" : ", online voice") + ")")
+                       : ("No voice found for " + (lang || lastLang) + " on this device. The answer stays readable on screen; install a voice in your system settings to hear it.");
+    resize();
+  }
+  function speak(text, lang) {
+    if (!text) { return; }
+    if (!synth) { updateVoiceInfo(lang); return; }
+    lastText = text; lastLang = lang || "en-IN";
+    synth.cancel();
+    var voice = pickVoice(lastLang), started = false, chunks = splitText(text);
+    updateVoiceInfo(lastLang);
+    setTimeout(function () {
+      chunks.forEach(function (c, i) {
+        var u = new SpeechSynthesisUtterance(c);
+        u.lang = voice ? voice.lang : lastLang; if (voice) { u.voice = voice; }
+        u.rate = 1; u.pitch = 1;
+        u.onstart = function () { started = true; $("mute").disabled = false; };
+        if (i === chunks.length - 1) { u.onend = function () { $("mute").disabled = true; }; }
+        u.onerror = function (e) { if (e.error !== "canceled" && e.error !== "interrupted") { setStatus("Could not speak the answer (" + e.error + "). It is still shown on screen.", "warn"); } };
+        synth.speak(u);
+      });
+    }, 80);
+    setTimeout(function () {
+      if (!started && !(synth.speaking)) { setStatus("If you did not hear the answer, press “Replay answer” (browsers only allow speech after you have interacted with the page) and check your volume.", "warn"); }
+    }, 2500);
+  }
+  function stopSpeaking() { if (synth) { synth.cancel(); } $("mute").disabled = true; }
+
+  function showSupport() {
+    var parts = [];
+    if (!SR) { parts.push("Speech recognition (the microphone) isn't available in this browser. Use Chrome or Edge on a computer or Android, or type your question in the box below. Firefox does not support it."); }
+    if (!synth) { parts.push("Spoken answers aren't available in this browser; answers are shown as text."); }
+    $("support").textContent = parts.join(" ");
+    if (!SR) { setStatus("⚠️ Microphone input isn't supported here. Please type your question below.", "warn"); }
+    resize();
+  }
+
+  // ---------------------------------------------------------------- wiring
+  $("mic").addEventListener("click", startListening);
+  $("stop").addEventListener("click", stopListening);
+  $("mute").addEventListener("click", stopSpeaking);
+  $("replay").addEventListener("click", function () { speak(lastText, lastLang); });
+  if (synth) { synth.onvoiceschanged = function () { updateVoiceInfo(lastLang); }; }
+
+  window.addEventListener("message", function (ev) {
+    var d = ev.data;
+    if (!d || d.type !== "streamlit:render") { return; }
+    args = d.args || {};
+    applyTheme(d.theme);
+    if (args.replay_text) { lastText = args.replay_text; lastLang = args.replay_lang || lastLang; $("replay").disabled = !synth; }
+    // Speak a NEW answer once (speak_id changes only when there is a new answer; remembered so re-renders never repeat it).
+    if (args.speak_id && args.speak_id !== lastSpokenId && args.auto_speak) {
+      lastSpokenId = args.speak_id; writeStore(lastSpokenId);
+      speak(args.speak_text, args.speak_lang);
+    } else if (args.speak_id) {
+      lastSpokenId = args.speak_id; writeStore(lastSpokenId);
+    }
+    if (!listening && $("status").textContent === "Loading…") {
+      setStatus(SR ? "Ready. Tap the microphone and ask, e.g. “Today I need to travel from Bhopal to Indore. What should I wear?”" : "Microphone input isn't supported in this browser. Please type your question below.", SR ? "info" : "warn");
+    }
+    $("mic").disabled = !SR || listening || !!d.disabled;
+    showSupport(); updateVoiceInfo(lastLang);
+  });
+
+  post("streamlit:componentReady", { apiVersion: 1 });
+  resize();
+})();
+</script>
+</body>
+</html>
